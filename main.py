@@ -15,6 +15,17 @@ from dateutil.relativedelta import relativedelta  # для агрегатора
 
 MODE = "AGGREGATE"   # "GENERATE" или "AGGREGATE"
 
+SUMMARY_PARAMS = {
+    "summary_sheet": "SUMMARY",
+    "summary_csv_base": "SUMMARY",  # без расширения
+    "fields": ["TN", "LastName", "FirstName", "MidleName", "TB_CODE", "ROLE_CODE"],  # что брать из штатки
+    "dupe_col": "IsDuplicate",
+    "month_periods": [f"M-{i}" for i in range(13)],
+    "week_periods": [f"N-{i}" for i in range(9)],
+    "2week_periods": [f"2N-{i}" for i in range(3)],
+}
+
+
 AGG_PARAMS = {
     "input_dir": "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//IN_BASE",
     "input_base": "EMPLOYEE_VISITS",   # Без расширения
@@ -78,13 +89,16 @@ def get_log_file():
     filename = f"{PARAMS['log_base']}_{date_str}.log"
     return os.path.join(PARAMS['log_dir'], filename)
 
-def setup_logging():
-    os.makedirs(PARAMS['log_dir'], exist_ok=True)
+def setup_logging(log_dir, log_base):
+    os.makedirs(log_dir, exist_ok=True)
     logger = logging.getLogger()
     logger.handlers.clear()
     logger.setLevel(logging.INFO)
     # Файл
-    file_handler = logging.FileHandler(get_log_file(), encoding='utf-8')
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    filename = f"{log_base}_{date_str}.log"
+    log_path = os.path.join(log_dir, filename)
+    file_handler = logging.FileHandler(log_path, encoding='utf-8')
     file_handler.setLevel(logging.INFO)
     # Консоль
     stream_handler = logging.StreamHandler()
@@ -96,10 +110,8 @@ def setup_logging():
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
     logger.info("=== START RUN ===")
-    logger.info("Параметры запуска: %s", PARAMS)
     return logger
 
-logger = setup_logging()
 
 def autofit_excel_columns(xlsx_path, sheet_name="Sheet1"):
     wb = load_workbook(xlsx_path)
@@ -121,7 +133,7 @@ def autofit_excel_columns(xlsx_path, sheet_name="Sheet1"):
         ws.column_dimensions[col].width = adjusted_width
     wb.save(xlsx_path)
 
-def load_org_units(path):
+def load_org_units(path, logger):
     try:
         df = pd.read_csv(path, sep=';', dtype=str)
         units = df[['TB_CODE','TB_FULL_NAME','TB_SHORT_NAME','GOSB_CODE','GOSB_NAME','GOSB_SHORT_NAME','ORG_UNIT_CODE']].to_dict('records')
@@ -130,6 +142,7 @@ def load_org_units(path):
     except Exception as e:
         logger.error(f"Ошибка при загрузке оргструктуры: {e}")
         raise
+
 
 # --- ФИО ---
 LAST_NAMES_MALE = [
@@ -152,7 +165,7 @@ MIDDLE_NAMES_MALE = [
 ]
 MIDDLE_NAMES_FEMALE = [x[:-2] + "вна" for x in MIDDLE_NAMES_MALE]
 
-def generate_unique_fio_set(count):
+def generate_unique_fio_set(count, logger):
     fio_set = set()
     results = []
     gender_list = []
@@ -216,7 +229,8 @@ def generate_unique_fio_set(count):
     logger.info(f"Итого уникальных ФИО: {len(results)} (мужчин: {gender_list.count('M')}, женщин: {gender_list.count('F')})")
     return results, gender_list
 
-def generate_unique_tn_set(count):
+
+def generate_unique_tn_set(count, logger):
     numbers = set()
     while len(numbers) < count:
         num = str(random.randint(10**3, 10**10-1)).zfill(10)
@@ -224,7 +238,8 @@ def generate_unique_tn_set(count):
     logger.info(f"Итого уникальных табельных номеров: {len(numbers)}")
     return list(numbers)
 
-def distribute_users(units, n_users):
+
+def distribute_users(units, n_users, logger):
     n_units = len(units)
     base = n_users // n_units
     result = []
@@ -244,10 +259,11 @@ def distribute_users(units, n_users):
     logger.info(f"Распределено сотрудников по подразделениям: {Counter(result)}")
     return result
 
-def generate_employees(org_units, n_users, role_distribution):
-    fio_list, gender_list = generate_unique_fio_set(n_users)
-    tn_list = generate_unique_tn_set(n_users)
-    unit_indices = distribute_users(org_units, n_users)
+
+def generate_employees(org_units, n_users, role_distribution, logger):
+    fio_list, gender_list = generate_unique_fio_set(n_users, logger)
+    tn_list = generate_unique_tn_set(n_users, logger)
+    unit_indices = distribute_users(org_units, n_users, logger)
 
     roles = []
     total_roles = sum(role_distribution.values())
@@ -285,7 +301,9 @@ def generate_employees(org_units, n_users, role_distribution):
     logger.info(f"Распределено по ролям: {Counter(roles)}")
     return employees
 
-def generate_visits(employees_df, start_date, end_date, target_row_count):
+
+
+def generate_visits(employees_df, start_date, end_date, target_row_count, logger):
     from datetime import datetime, timedelta
     import random
     dates = []
@@ -306,6 +324,7 @@ def generate_visits(employees_df, start_date, end_date, target_row_count):
     all_weekdays = [d for d in dates if d.weekday() < 5]
     all_weekends = [d for d in dates if d.weekday() >= 5]
 
+    # Основной цикл по сотрудникам
     for idx in emp_indices:
         emp = employees_df.loc[idx]
         if idx in rare_indices:
@@ -331,12 +350,31 @@ def generate_visits(employees_df, start_date, end_date, target_row_count):
         if len(visit_data) >= target_row_count:
             break
 
+    # Добор случайных визитов если строк меньше чем нужно
+    if len(visit_data) < target_row_count:
+        logger.warning(f"Недостаточно визитов: {len(visit_data)}. Добавляем случайные визиты до {target_row_count}...")
+        all_dates = [dt.strftime("%Y-%m-%d") for dt in dates]
+        emp_indices_full = employees_df.index.tolist()
+        while len(visit_data) < target_row_count:
+            idx = random.choice(emp_indices_full)
+            emp = employees_df.loc[idx]
+            dt = random.choice(all_dates)
+            row = dict(emp)
+            row['Date'] = dt
+            row['Visited'] = 1
+            visit_data.append(row)
+
+    # Обрезаем если вдруг перебор
     if len(visit_data) > target_row_count:
         visit_data = visit_data[:target_row_count]
+    logger.info(f"Сгенерировано посещений: {len(visit_data)}")
     return visit_data
 
 
-def save_employees(employees, out_dir, out_base, timestamp=None):
+
+
+
+def save_employees(employees, out_dir, out_base, logger, timestamp=None):
     import pandas as pd
     os.makedirs(out_dir, exist_ok=True)
     ts = timestamp or get_timestamp()
@@ -358,7 +396,9 @@ def save_employees(employees, out_dir, out_base, timestamp=None):
     return df, csv_path, xlsx_path
 
 
-def save_visits(visit_data, out_csv, out_xlsx):
+
+
+def save_visits(visit_data, out_csv, out_xlsx, logger):
     import pandas as pd
     df = pd.DataFrame(visit_data)
     df.to_csv(out_csv, sep=";", index=False)
@@ -369,11 +409,13 @@ def save_visits(visit_data, out_csv, out_xlsx):
     autofit_excel_columns(out_xlsx, sheet_name="VISITS")
     logger.info(f"Таблица посещений сохранена в Excel: {out_xlsx}")
 
-def generate_all():
+
+
+def generate_all(logger):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     org_path = os.path.join(PARAMS["input_dir"], PARAMS["org_unit_file"])
-    org_units = load_org_units(org_path)
-    employees = generate_employees(org_units, PARAMS["user_count"], PARAMS["role_distribution"])
+    org_units = load_org_units(org_path, logger)
+    employees = generate_employees(org_units, PARAMS["user_count"], PARAMS["role_distribution"], logger)
     logger.info(f"Сгенерировано сотрудников: {len(employees)}")
 
     emp_csv = os.path.join(PARAMS["output_dir"], f"{PARAMS['output_base']}_{timestamp}.csv")
@@ -382,6 +424,7 @@ def generate_all():
         employees,
         PARAMS["output_dir"],
         PARAMS["output_base"],
+        logger,
         timestamp=timestamp
     )
 
@@ -394,13 +437,15 @@ def generate_all():
         employees_df,
         VISIT_PARAMS['visit_start_date'],
         VISIT_PARAMS['visit_end_date'],
-        VISIT_PARAMS['visit_target_row_count']
+        VISIT_PARAMS['visit_target_row_count'],
+        logger
     )
-    save_visits(visit_data, visit_csv, visit_xlsx)
+    save_visits(visit_data, visit_csv, visit_xlsx, logger)
     logger.info("Генерация посещений завершена")
 
 
-def aggregate():
+
+def aggregate(logger):
     params = AGG_PARAMS
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -411,6 +456,7 @@ def aggregate():
 
     logger.info("Режим агрегации посещений")
     df = pd.read_csv(input_csv, sep=";", dtype=str)
+    df[params["field_nvisits"]] = pd.to_numeric(df[params["field_nvisits"]], errors="coerce").fillna(0).astype(int)
     df_role = pd.read_csv(input_role_csv, sep=";", dtype=str)
 
     # Агрегация по уникальным ключам, сумма посещений
@@ -457,29 +503,130 @@ def aggregate():
 
     logger.info(f"Финальный размер: {df_result.shape}")
 
-    # ---- СОХРАНЕНИЕ С ТАЙМШТАМПОМ ----
-    df_result.to_csv(output_csv, sep=";", index=False)
-    logger.info(f"Результат сохранён в CSV: {output_csv}")
+    # === СОЗДАНИЕ SUMMARY-ЛИСТА ===
+    # Параметры summary
+    SUMMARY_PARAMS = {
+        "summary_sheet": "SUMMARY",
+        "summary_csv_base": "SUMMARY",  # без расширения
+        "fields": ["TN", "LastName", "FirstName", "MidleName", "TB_CODE", "ROLE_CODE"],
+        "dupe_col": "IsDuplicate",
+        "month_periods": [f"M-{i}" for i in range(13)],
+        "week_periods": [f"N-{i}" for i in range(9)],
+        "2week_periods": [f"2N-{i}" for i in range(3)],
+    }
 
+    logger.info("Формируем данные для SUMMARY листа...")
+    # Считаем дубли по TN
+    tn_counts = df_role[params["field_tn"]].value_counts()
+    df_role["IsDuplicate"] = df_role[params["field_tn"]].map(lambda x: "Дубль" if tn_counts[x] > 1 else "")
+
+    summary_fields = SUMMARY_PARAMS["fields"] + [SUMMARY_PARAMS["dupe_col"]]
+    df_summary = df_role[summary_fields].drop_duplicates()
+
+    agg = df_agg.copy()
+    agg["DATE_DT"] = pd.to_datetime(agg[params["field_date"]])
+
+    # Месяцы
+    for i, m_label in enumerate(SUMMARY_PARAMS["month_periods"]):
+        start = (max_date - pd.DateOffset(months=i)).replace(day=1)
+        end = (start + pd.DateOffset(months=1)) - pd.DateOffset(days=1)
+        mask = (agg["DATE_DT"] >= start) & (agg["DATE_DT"] <= end)
+        visited = agg.loc[mask].groupby(params["field_tn"])[params["field_nvisits"]].sum().gt(0)
+        df_summary[m_label] = df_summary["TN"].map(lambda tn: int(visited.get(tn, False)))
+    # Недели
+    for i, w_label in enumerate(SUMMARY_PARAMS["week_periods"]):
+        week_start = (max_date - pd.DateOffset(weeks=i)).to_period('W').start_time
+        week_end = week_start + pd.Timedelta(days=6)
+        mask = (agg["DATE_DT"] >= week_start) & (agg["DATE_DT"] <= week_end)
+        visited = agg.loc[mask].groupby(params["field_tn"])[params["field_nvisits"]].sum().gt(0)
+        df_summary[w_label] = df_summary["TN"].map(lambda tn: int(visited.get(tn, False)))
+    # 2-недельные
+    for i, tw_label in enumerate(SUMMARY_PARAMS["2week_periods"]):
+        tw_start = (max_date - pd.DateOffset(weeks=2*i)).to_period('W').start_time
+        tw_end = tw_start + pd.Timedelta(days=13)
+        mask = (agg["DATE_DT"] >= tw_start) & (agg["DATE_DT"] <= tw_end)
+        visited = agg.loc[mask].groupby(params["field_tn"])[params["field_nvisits"]].sum().gt(0)
+        df_summary[tw_label] = df_summary["TN"].map(lambda tn: int(visited.get(tn, False)))
+
+    # Сохраняем SUMMARY в CSV
+    summary_csv = os.path.join(params["output_dir"], f"{SUMMARY_PARAMS['summary_csv_base']}_{timestamp}.csv")
+    df_summary.to_csv(summary_csv, sep=";", index=False)
+    logger.info(f"Summary сохранён в CSV: {summary_csv}")
+
+    # ---- СОХРАНЕНИЕ С ТАЙМШТАМПОМ (Excel два листа) ----
     with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
         df_result.to_excel(writer, sheet_name="AGGREGATED", index=False)
+        df_summary.to_excel(writer, sheet_name=SUMMARY_PARAMS["summary_sheet"], index=False)
     autofit_excel_columns(output_xlsx, sheet_name="AGGREGATED")
+    autofit_excel_columns(output_xlsx, sheet_name=SUMMARY_PARAMS["summary_sheet"])
     logger.info(f"Результат сохранён в Excel: {output_xlsx} (автоформатирование)")
+
+    # Сохраняем основной агрегат в CSV
+    df_result.to_csv(output_csv, sep=";", index=False)
+    logger.info(f"Результат сохранён в CSV: {output_csv}")
 
     logger.info("Обработка завершена.")
 
 
 
+def create_summary_sheet(logger, df_role, df_agg, max_date, output_dir, summary_csv_base):
+    logger.info("Создаём summary-лист по всем сотрудникам и периодам...")
+
+    # Считаем дубли по TN
+    tn_counts = df_role["TN"].value_counts()
+    df_role["IsDuplicate"] = df_role["TN"].map(lambda x: "Дубль" if tn_counts[x] > 1 else "")
+
+    # Оставляем только нужные колонки и дубли
+    summary_fields = SUMMARY_PARAMS["fields"] + [SUMMARY_PARAMS["dupe_col"]]
+    df_summary = df_role[summary_fields].drop_duplicates()
+
+    # Для ускорения — индексы по TN
+    agg = df_agg.copy()
+    agg["DATE_DT"] = pd.to_datetime(agg["Date"])
+
+    # Периоды
+    # Месяцы
+    for i, m_label in enumerate(SUMMARY_PARAMS["month_periods"]):
+        start = (max_date - pd.DateOffset(months=i)).replace(day=1)
+        end = (start + pd.DateOffset(months=1)) - pd.DateOffset(days=1)
+        mask = (agg["DATE_DT"] >= start) & (agg["DATE_DT"] <= end)
+        visited = agg.loc[mask].groupby("TN")["Visited"].sum().gt(0)
+        df_summary[m_label] = df_summary["TN"].map(lambda tn: int(visited.get(tn, False)))
+    # Недели
+    for i, w_label in enumerate(SUMMARY_PARAMS["week_periods"]):
+        week_start = (max_date - pd.DateOffset(weeks=i)).to_period('W').start_time
+        week_end = week_start + pd.Timedelta(days=6)
+        mask = (agg["DATE_DT"] >= week_start) & (agg["DATE_DT"] <= week_end)
+        visited = agg.loc[mask].groupby("TN")["Visited"].sum().gt(0)
+        df_summary[w_label] = df_summary["TN"].map(lambda tn: int(visited.get(tn, False)))
+    # 2-недельные
+    for i, tw_label in enumerate(SUMMARY_PARAMS["2week_periods"]):
+        tw_start = (max_date - pd.DateOffset(weeks=2*i)).to_period('W').start_time
+        tw_end = tw_start + pd.Timedelta(days=13)
+        mask = (agg["DATE_DT"] >= tw_start) & (agg["DATE_DT"] <= tw_end)
+        visited = agg.loc[mask].groupby("TN")["Visited"].sum().gt(0)
+        df_summary[tw_label] = df_summary["TN"].map(lambda tn: int(visited.get(tn, False)))
+
+    # Сохраняем в CSV
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_csv = os.path.join(output_dir, f"{summary_csv_base}_{timestamp}.csv")
+    df_summary.to_csv(summary_csv, sep=";", index=False)
+    logger.info(f"Summary сохранён в CSV: {summary_csv}")
+
+    return df_summary
+
 
 
 def main():
-    if MODE.upper() == "GENERATE":
-        generate_all()
-    elif MODE.upper() == "AGGREGATE":
-        aggregate()
+    if MODE.upper() == "AGGREGATE":
+        logger = setup_logging(AGG_PARAMS["log_dir"], AGG_PARAMS["log_base"])
+        aggregate(logger)
+    elif MODE.upper() == "GENERATE":
+        logger = setup_logging(PARAMS["log_dir"], PARAMS["log_base"])
+        generate_all(logger)
     else:
+        logger = setup_logging(PARAMS["log_dir"], PARAMS["log_base"])
         logger.error("Некорректный режим работы! Допустимы только 'GENERATE' или 'AGGREGATE'.")
-
 
 
 
@@ -487,5 +634,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        logger.exception(f"Ошибка при выполнении: {e}")
+        print(f"Ошибка при выполнении: {e}")
         raise
+
