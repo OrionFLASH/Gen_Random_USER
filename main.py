@@ -29,12 +29,14 @@ SUMMARY_PARAMS = {
 
 AGG_PARAMS = {
     "input_dir": "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//IN_BASE",
-    "input_base": "EMPLOYEE_VISITS",   # Без расширения
-    "input_role_base": "EMPLOEE",      # Без расширения
+    "input_base": "EMPLOYEE_VISITS_400",   # Без расширения
+    "input_role_base": "EMPLOEE_400",      # Без расширения
     "output_dir": "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//OUT_CSV",
-    "output_base": "VISIT_AGGREGATED",                 # Без расширения
+    "output_base": "VISIT_AGGREGATED_400",                 # Без расширения
     "log_dir": "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//LOGS",
     "log_base": "AGG_LOG",
+    "period_day_month_border": 7,  # до какого числа месяца включительно M-0 объединяет два месяца
+    "period_weekday_border": 1, # до какого дня недели включительно N-0 и 2N-0 захватывают прошлую неделю/две (0=Пн, 1=Вт и т.д.)
     # Ожидаемые поля
     "field_tn": "TN",
     "field_lastname": "LastName",
@@ -493,14 +495,16 @@ def generate_all(logger):
     logger.info(f"Время выполнения generate_all: {prog_t1-prog_t0:.2f} сек")
 
 
-
-import time
-
 def aggregate(logger):
+    import time
     prog_t0 = time.time()
     logger.info("----- АГРЕГАЦИЯ -----")
     params = AGG_PARAMS
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Параметры для периодов (по умолчанию 7 и 1)
+    period_day_month_border = params.get("period_day_month_border", 7)
+    period_weekday_border = params.get("period_weekday_border", 1)
 
     input_csv = os.path.join(params["input_dir"], params["input_base"] + ".csv")
     input_role_csv = os.path.join(params["input_dir"], params["input_role_base"] + ".csv")
@@ -515,7 +519,6 @@ def aggregate(logger):
     t1 = time.time()
     logger.info(f"Время на загрузку файлов: {t1-t0:.2f} сек")
 
-    # Агрегация по уникальным ключам, сумма посещений
     key_fields = [
         params["field_tn"], params["field_lastname"],
         params["field_firstname"], params["field_middlename"],
@@ -534,21 +537,64 @@ def aggregate(logger):
 
     def get_month_period(date_str):
         dt = pd.to_datetime(date_str)
-        return f"M-{(max_date.year - dt.year) * 12 + (max_date.month - dt.month)}"
+        if max_date.day <= period_day_month_border:
+            period_start = (max_date - pd.DateOffset(months=1)).replace(day=1)
+            period_end = max_date
+            if dt >= period_start and dt <= period_end:
+                return "M-0"
+            months_diff = (period_start.year - dt.year) * 12 + (period_start.month - dt.month)
+            return f"M-{months_diff + 1}"
+        else:
+            period_start = max_date.replace(day=1)
+            period_end = max_date
+            if dt >= period_start and dt <= period_end:
+                return "M-0"
+            months_diff = (period_start.year - dt.year) * 12 + (period_start.month - dt.month)
+            return f"M-{months_diff + 1}"
 
     def get_week_period(date_str):
         dt = pd.to_datetime(date_str)
-        max_week_start = max_date - timedelta(days=max_date.weekday())
-        dt_week_start = dt - timedelta(days=dt.weekday())
-        week_diff = (max_week_start - dt_week_start).days // 7
-        return f"N-{week_diff}"
+        max_weekday = max_date.weekday()
+        if max_weekday <= period_weekday_border:
+            # N-0 — с прошлого понедельника по max_date
+            last_monday = max_date - timedelta(days=max_weekday + 7)
+            period_start = last_monday
+            period_end = max_date
+            if dt >= period_start and dt <= period_end:
+                return "N-0"
+            week_diff = ((period_start - dt + timedelta(days=dt.weekday())).days) // 7
+            return f"N-{week_diff + 1}"
+        else:
+            # N-0 — текущая неделя (с текущего понедельника)
+            curr_monday = max_date - timedelta(days=max_weekday)
+            period_start = curr_monday
+            period_end = max_date
+            if dt >= period_start and dt <= period_end:
+                return "N-0"
+            week_diff = ((period_start - dt + timedelta(days=dt.weekday())).days) // 7
+            return f"N-{week_diff + 1}"
 
     def get_2week_period(date_str):
         dt = pd.to_datetime(date_str)
-        max_2w_start = max_date - timedelta(days=max_date.weekday())
-        dt_2w_start = dt - timedelta(days=dt.weekday())
-        tw_diff = ((max_2w_start - dt_2w_start).days) // 14
-        return f"2N-{tw_diff}"
+        max_weekday = max_date.weekday()
+        if max_weekday <= period_weekday_border:
+            # 2N-0 — две прошлых недели до max_date
+            start_2weeks = max_date - timedelta(days=max_weekday + 14)
+            period_start = start_2weeks
+            period_end = max_date
+            if dt >= period_start and dt <= period_end:
+                return "2N-0"
+            tw_diff = ((period_start - dt + timedelta(days=dt.weekday())).days) // 14
+            return f"2N-{tw_diff + 1}"
+        else:
+            # 2N-0 — текущие две недели (от текущего понедельника)
+            curr_2w_monday = max_date - timedelta(days=max_weekday)
+            period_start = curr_2w_monday
+            period_end = max_date
+            if dt >= period_start and dt <= period_end:
+                return "2N-0"
+            tw_diff = ((period_start - dt + timedelta(days=dt.weekday())).days) // 14
+            return f"2N-{tw_diff + 1}"
 
     t4 = time.time()
     logger.info("Добавляем временные колонки (месяц, неделя, двухнедельный период)...")
@@ -589,6 +635,7 @@ def aggregate(logger):
 
     # Месяцы
     for i, m_label in enumerate(SUMMARY_PARAMS["month_periods"]):
+        # Для отчёта период всегда считается "от и до" -- как и ранее, без особых сдвигов!
         start = (max_date - pd.DateOffset(months=i)).replace(day=1)
         end = (start + pd.DateOffset(months=1)) - pd.DateOffset(days=1)
         mask = (agg["DATE_DT"] >= start) & (agg["DATE_DT"] <= end)
@@ -634,6 +681,7 @@ def aggregate(logger):
 
     prog_t1 = time.time()
     logger.info(f"Время выполнения aggregate: {prog_t1-prog_t0:.2f} сек")
+
 
 
 
