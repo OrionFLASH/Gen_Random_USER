@@ -4,18 +4,43 @@ import random
 import string
 import pandas as pd
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import Counter
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font
+from dateutil.relativedelta import relativedelta  # для агрегатора
+
+
+
+MODE = "AGGREGATE"   # "GENERATE" или "AGGREGATE"
+
+AGG_PARAMS = {
+    "input_dir": "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//IN_BASE",
+    "input_base": "EMPLOYEE_VISITS",   # Без расширения
+    "input_role_base": "EMPLOEE",      # Без расширения
+    "output_dir": "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//OUT_CSV",
+    "output_base": "VISIT_AGGREGATED",                 # Без расширения
+    "log_dir": "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//LOGS",
+    "log_base": "AGG_LOG",
+    # Ожидаемые поля
+    "field_tn": "TN",
+    "field_lastname": "LastName",
+    "field_firstname": "FirstName",
+    "field_middlename": "MidleName",
+    "field_tb": "TB_CODE",
+    "field_date": "Date",
+    "field_nvisits": "Visited",
+    "field_role": "ROLE_CODE"
+}
+
 
 # ======= ПАРАМЕТРЫ ==========
 PARAMS = {
     "input_dir": "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//IN_BASE",
     "org_unit_file": "ORG_UNIT.csv",
     "output_dir": "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//OUT_CSV",
-    "output_base": "EMPLOEE",
+    "output_base": "EMPLOEE",    # Без расширения
     "log_dir": "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//LOGS",
     "log_base": "LOG",
     "user_count": 8000,
@@ -38,11 +63,10 @@ PARAMS = {
 # ============================
 
 VISIT_PARAMS = {
+    "visit_out_dir": "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//OUT_CSV",
+    "visit_out_base": "EMPLOYEE_VISITS",    # Без расширения
     "visit_start_date": "2025-01-01",
     "visit_end_date":   "2025-07-12",
-    "visit_out_base":   "EMPLOYEE_VISITS",
-#    "visit_out_csv":    "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//OUT_CSV//EMPLOYEE_VISITS.csv",
-#    "visit_out_xlsx":   "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//OUT_CSV//EMPLOYEE_VISITS.xlsx",
     "visit_target_row_count": 900_000
 }
 
@@ -345,35 +369,27 @@ def save_visits(visit_data, out_csv, out_xlsx):
     autofit_excel_columns(out_xlsx, sheet_name="VISITS")
     logger.info(f"Таблица посещений сохранена в Excel: {out_xlsx}")
 
-
-
-
-def main():
-
-    logger.info("Начало работы программы")
+def generate_all():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    # Генерация сотрудников
     org_path = os.path.join(PARAMS["input_dir"], PARAMS["org_unit_file"])
     org_units = load_org_units(org_path)
     employees = generate_employees(org_units, PARAMS["user_count"], PARAMS["role_distribution"])
     logger.info(f"Сгенерировано сотрудников: {len(employees)}")
-    employees_df, emp_csv, emp_xlsx = save_employees(
+
+    emp_csv = os.path.join(PARAMS["output_dir"], f"{PARAMS['output_base']}_{timestamp}.csv")
+    emp_xlsx = os.path.join(PARAMS["output_dir"], f"{PARAMS['output_base']}_{timestamp}.xlsx")
+    employees_df, _, _ = save_employees(
         employees,
         PARAMS["output_dir"],
         PARAMS["output_base"],
         timestamp=timestamp
     )
+
     logger.info("Генерация сотрудников завершена, начинаем генерацию посещений")
 
-    # Формируем итоговые имена файлов посещений — только имя без расширения в VISIT_PARAMS
-    visit_out_dir = PARAMS["output_dir"]  # Или VISIT_PARAMS["visit_out_dir"], если хотите отдельную папку
-    visit_base = VISIT_PARAMS["visit_out_base"]
+    visit_csv = os.path.join(VISIT_PARAMS["visit_out_dir"], f"{VISIT_PARAMS['visit_out_base']}_{timestamp}.csv")
+    visit_xlsx = os.path.join(VISIT_PARAMS["visit_out_dir"], f"{VISIT_PARAMS['visit_out_base']}_{timestamp}.xlsx")
 
-    visit_csv = os.path.join(visit_out_dir, f"{visit_base}_{timestamp}.csv")
-    visit_xlsx = os.path.join(visit_out_dir, f"{visit_base}_{timestamp}.xlsx")
-
-    # Генерация и сохранение посещений
     visit_data = generate_visits(
         employees_df,
         VISIT_PARAMS['visit_start_date'],
@@ -382,6 +398,87 @@ def main():
     )
     save_visits(visit_data, visit_csv, visit_xlsx)
     logger.info("Генерация посещений завершена")
+
+
+def aggregate():
+    params = AGG_PARAMS
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    input_csv = os.path.join(params["input_dir"], params["input_base"] + ".csv")
+    input_role_csv = os.path.join(params["input_dir"], params["input_role_base"] + ".csv")
+    output_csv = os.path.join(params["output_dir"], f"{params['output_base']}_{timestamp}.csv")
+    output_xlsx = os.path.join(params["output_dir"], f"{params['output_base']}_{timestamp}.xlsx")
+
+    logger.info("Режим агрегации посещений")
+    df = pd.read_csv(input_csv, sep=";", dtype=str)
+    df_role = pd.read_csv(input_role_csv, sep=";", dtype=str)
+
+    # Агрегация по уникальным ключам, сумма посещений
+    key_fields = [
+        params["field_tn"], params["field_lastname"],
+        params["field_firstname"], params["field_middlename"],
+        params["field_tb"], params["field_date"]
+    ]
+    agg_dict = {params["field_nvisits"]: "sum"}
+    logger.info(f"Агрегируем по: {key_fields}, агрегируем поле: {params['field_nvisits']}")
+    df_agg = df.groupby(key_fields, as_index=False).agg(agg_dict)
+
+    # --- ДОБАВЛЯЕМ КОЛОНКИ МЕСЯЦ, НЕДЕЛЯ, ДВУХНЕДЕЛЬНЫЙ ПЕРИОД ---
+    logger.info("Определяем максимальную дату для расчёта периодов...")
+    max_date = pd.to_datetime(df_agg[params["field_date"]]).max()
+
+    def get_month_period(date_str):
+        dt = pd.to_datetime(date_str)
+        return f"M-{(max_date.year - dt.year) * 12 + (max_date.month - dt.month)}"
+
+    def get_week_period(date_str):
+        dt = pd.to_datetime(date_str)
+        max_week_start = max_date - timedelta(days=max_date.weekday())
+        dt_week_start = dt - timedelta(days=dt.weekday())
+        week_diff = (max_week_start - dt_week_start).days // 7
+        return f"N-{week_diff}"
+
+    def get_2week_period(date_str):
+        dt = pd.to_datetime(date_str)
+        max_2w_start = max_date - timedelta(days=max_date.weekday())
+        dt_2w_start = dt - timedelta(days=dt.weekday())
+        tw_diff = ((max_2w_start - dt_2w_start).days) // 14
+        return f"2N-{tw_diff}"
+
+    logger.info("Добавляем временные колонки (месяц, неделя, двухнедельный период)...")
+    df_agg["PERIOD_MONTH"] = df_agg[params["field_date"]].apply(get_month_period)
+    df_agg["PERIOD_WEEK"] = df_agg[params["field_date"]].apply(get_week_period)
+    df_agg["PERIOD_2WEEK"] = df_agg[params["field_date"]].apply(get_2week_period)
+
+    # --- ДОБАВЛЯЕМ ДАННЫЕ ПО РОЛИ ---
+    logger.info("Дозаполнение ROLE_CODE из штатки (join по TN)...")
+    df_role_part = df_role[[params["field_tn"], params["field_role"]]].drop_duplicates()
+    df_result = df_agg.merge(df_role_part, how="left", on=params["field_tn"])
+
+    logger.info(f"Финальный размер: {df_result.shape}")
+
+    # ---- СОХРАНЕНИЕ С ТАЙМШТАМПОМ ----
+    df_result.to_csv(output_csv, sep=";", index=False)
+    logger.info(f"Результат сохранён в CSV: {output_csv}")
+
+    with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
+        df_result.to_excel(writer, sheet_name="AGGREGATED", index=False)
+    autofit_excel_columns(output_xlsx, sheet_name="AGGREGATED")
+    logger.info(f"Результат сохранён в Excel: {output_xlsx} (автоформатирование)")
+
+    logger.info("Обработка завершена.")
+
+
+
+
+
+def main():
+    if MODE.upper() == "GENERATE":
+        generate_all()
+    elif MODE.upper() == "AGGREGATE":
+        aggregate()
+    else:
+        logger.error("Некорректный режим работы! Допустимы только 'GENERATE' или 'AGGREGATE'.")
 
 
 
