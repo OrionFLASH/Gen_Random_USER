@@ -398,8 +398,7 @@ def generate_visits(employees_df, start_date, end_date, target_row_count, logger
 
 def build_month_periods(max_date, n_periods, border_day, logger=None):
     """
-    Возвращает список кортежей (start, end) для каждого периода M-0, M-1, ...,
-    где M-0 может включать доп. месяц. Логирует интервалы.
+    Возвращает список кортежей (start, end) для каждого периода M-0, M-1, ... (без перекрытия!)
     """
     periods = []
     if max_date.day <= border_day:
@@ -409,9 +408,10 @@ def build_month_periods(max_date, n_periods, border_day, logger=None):
         periods.append((m0_start, m0_end))
         if logger:
             logger.info(f"M-0: {m0_start.date()} .. {m0_end.date()} (Объединённый период)")
-        # Далее обычные месяцы
+        # Следующий период: месяц, предшествующий m0_start
         for i in range(1, n_periods):
-            start = (m0_start - pd.DateOffset(months=i-1)).replace(day=1)
+            # start: первый день месяца на i месяцев до m0_start
+            start = (m0_start - pd.DateOffset(months=i)).replace(day=1)
             end = (start + pd.DateOffset(months=1)) - pd.DateOffset(days=1)
             periods.append((start, end))
             if logger:
@@ -424,7 +424,7 @@ def build_month_periods(max_date, n_periods, border_day, logger=None):
         if logger:
             logger.info(f"M-0: {m0_start.date()} .. {m0_end.date()}")
         for i in range(1, n_periods):
-            start = (m0_start - pd.DateOffset(months=i-1)).replace(day=1)
+            start = (m0_start - pd.DateOffset(months=i)).replace(day=1)
             end = (start + pd.DateOffset(months=1)) - pd.DateOffset(days=1)
             periods.append((start, end))
             if logger:
@@ -432,38 +432,39 @@ def build_month_periods(max_date, n_periods, border_day, logger=None):
     return periods
 
 
+
 def build_week_periods(max_date, n_periods, border_weekday, logger=None):
     """
-    Возвращает список (start, end) для каждой недели: N-0, N-1...,
-    N-0 может захватить две недели. Логирует интервалы.
+    Возвращает список (start, end) для каждой недели: N-0, N-1... без перекрытия!
+    N-0 может быть объединённым (две недели), остальные — обычные недели.
     border_weekday: до какого дня недели включительно захватываем прошлую неделю (0=Пн)
     """
     periods = []
     max_weekday = max_date.weekday()
     if max_weekday <= border_weekday:
-        # N-0: прошлый понедельник - max_date
-        last_monday = max_date - timedelta(days=max_weekday + 7)
-        n0_start = last_monday
+        # N-0: прошлый понедельник - max_date (охватывает почти две недели)
+        n0_start = max_date - timedelta(days=max_weekday + 7)
         n0_end = max_date
         periods.append((n0_start, n0_end))
         if logger:
             logger.info(f"N-0: {n0_start.date()} .. {n0_end.date()} (Объединённый период)")
+        # N-1: предыдущая неделя до n0_start-1
         for i in range(1, n_periods):
-            start = n0_start - timedelta(weeks=i-1)
+            # новый период — неделя ДО предыдущего периода
+            start = n0_start - timedelta(weeks=i)
             end = start + timedelta(days=6)
             periods.append((start, end))
             if logger:
                 logger.info(f"N-{i}: {start.date()} .. {end.date()}")
     else:
         # N-0: текущий понедельник - max_date
-        curr_monday = max_date - timedelta(days=max_weekday)
-        n0_start = curr_monday
+        n0_start = max_date - timedelta(days=max_weekday)
         n0_end = max_date
         periods.append((n0_start, n0_end))
         if logger:
             logger.info(f"N-0: {n0_start.date()} .. {n0_end.date()}")
         for i in range(1, n_periods):
-            start = n0_start - timedelta(weeks=i-1)
+            start = n0_start - timedelta(weeks=i)
             end = start + timedelta(days=6)
             periods.append((start, end))
             if logger:
@@ -471,56 +472,57 @@ def build_week_periods(max_date, n_periods, border_weekday, logger=None):
     return periods
 
 
-def get_period_label(dt, periods, label_template):
+
+def get_period_label(dt, periods, label_template, default=None):
     """
     Присваивает метку периоду по номеру (находит первое попадание dt в период).
     label_template: "M-{}", "N-{}", "2N-{}"
+    default: что вернуть, если не найдено совпадений (по умолчанию — последняя метка)
     """
     for idx, (start, end) in enumerate(periods):
         if start <= dt <= end:
             return label_template.format(idx)
-    # Если не нашли — ставим последнюю (или можно пусто)
+    if default is not None:
+        return default
     return label_template.format(len(periods)-1)
+
 
 
 def build_2week_periods(max_date, n_periods, border_weekday, logger=None):
     """
-    Возвращает список (start, end) для каждого двухнедельного периода: 2N-0, 2N-1, ...
-    2N-0 может быть объединённым (две прошлых недели + текущая до max_date).
-    Логирует интервалы.
-    border_weekday: до какого дня недели включительно захватываем прошлые 2 недели (0=Пн)
+    Возвращает список (start, end) для каждого двухнедельного периода: 2N-0, 2N-1...
+    2N-0 может быть объединённым (3 недели), остальные — обычные двухнедельки.
     """
     periods = []
     max_weekday = max_date.weekday()
     if max_weekday <= border_weekday:
-        # 2N-0: прошлый-прошлый понедельник - max_date (две недели назад)
-        last2w_monday = max_date - timedelta(days=max_weekday + 14)
-        n0_start = last2w_monday
+        # 2N-0: прошлый-прошлый понедельник - max_date (охватывает почти 3 недели)
+        n0_start = max_date - timedelta(days=max_weekday + 14)
         n0_end = max_date
         periods.append((n0_start, n0_end))
         if logger:
             logger.info(f"2N-0: {n0_start.date()} .. {n0_end.date()} (Объединённый период)")
         for i in range(1, n_periods):
-            start = n0_start - timedelta(weeks=2*(i-1))
+            start = n0_start - timedelta(weeks=2*i)
             end = start + timedelta(days=13)
             periods.append((start, end))
             if logger:
                 logger.info(f"2N-{i}: {start.date()} .. {end.date()}")
     else:
-        # 2N-0: текущий понедельник - max_date (две недели назад)
-        curr2w_monday = max_date - timedelta(days=max_weekday)
-        n0_start = curr2w_monday
+        # 2N-0: текущий понедельник - max_date (две недели)
+        n0_start = max_date - timedelta(days=max_weekday)
         n0_end = max_date
         periods.append((n0_start, n0_end))
         if logger:
             logger.info(f"2N-0: {n0_start.date()} .. {n0_end.date()}")
         for i in range(1, n_periods):
-            start = n0_start - timedelta(weeks=2*(i-1))
+            start = n0_start - timedelta(weeks=2*i)
             end = start + timedelta(days=13)
             periods.append((start, end))
             if logger:
                 logger.info(f"2N-{i}: {start.date()} .. {end.date()}")
     return periods
+
 
 
 def save_employees(employees, out_dir, out_base, logger, timestamp=None):
