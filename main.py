@@ -10,6 +10,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font
 from dateutil.relativedelta import relativedelta  # для агрегатора
+import time
 
 
 
@@ -77,9 +78,24 @@ VISIT_PARAMS = {
     "visit_out_dir": "//Users//orionflash//Desktop//MyProject//Gen_Random_USER//OUT_CSV",
     "visit_out_base": "EMPLOYEE_VISITS",    # Без расширения
     "visit_start_date": "2025-01-01",
-    "visit_end_date":   "2025-07-12",
-    "visit_target_row_count": 900_000
+    "visit_end_date":   "2025-08-05",
+    "visit_target_row_count": 400_000
 }
+
+# --- Системные текстовки для итогового лога ---
+SUMMARY_TEXT = {
+    "time_start": "Время старта программы: {ts}",
+    "time_end": "Время окончания программы: {ts}",
+    "time_total": "Общее время работы: {sec:.2f} сек",
+    "block": "----- {block} -----",
+    "block_time": "Блок '{block}': {sec:.2f} сек",
+    "gen_users": "Сгенерировано сотрудников: {count}",
+    "gen_visits": "Сгенерировано посещений: {count}",
+    "agg_visits": "Обработано посещений: {count}",
+    "agg_users": "Обработано уникальных сотрудников: {count}",
+    "mean_role": "Среднее число посещений по роли '{role}': {mean:.2f}",
+}
+
 
 def get_timestamp(fmt="%Y%m%d_%H%M%S"):
     return datetime.now().strftime(fmt)
@@ -111,6 +127,15 @@ def setup_logging(log_dir, log_base):
     logger.addHandler(stream_handler)
     logger.info("=== START RUN ===")
     return logger
+
+
+def log_time(logger, block, t_start, t_end, text_dict=SUMMARY_TEXT):
+    sec = t_end - t_start
+    logger.info(text_dict["block_time"].format(block=block, sec=sec))
+
+def log_summary(logger, summary: dict, text_dict=SUMMARY_TEXT):
+    for key, val in summary.items():
+        logger.info(val)
 
 
 def autofit_excel_columns(xlsx_path, sheet_name="Sheet1"):
@@ -409,17 +434,24 @@ def save_visits(visit_data, out_csv, out_xlsx, logger):
     autofit_excel_columns(out_xlsx, sheet_name="VISITS")
     logger.info(f"Таблица посещений сохранена в Excel: {out_xlsx}")
 
-
-
 def generate_all(logger):
+    prog_t0 = time.time()
+    logger.info("----- ГЕНЕРАЦИЯ -----")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     org_path = os.path.join(PARAMS["input_dir"], PARAMS["org_unit_file"])
+
+    t0 = time.time()
     org_units = load_org_units(org_path, logger)
+    t1 = time.time()
+    logger.info(f"Время на загрузку оргструктуры: {t1-t0:.2f} сек")
+
+    t2 = time.time()
     employees = generate_employees(org_units, PARAMS["user_count"], PARAMS["role_distribution"], logger)
+    t3 = time.time()
+    logger.info(f"Время на генерацию сотрудников: {t3-t2:.2f} сек")
     logger.info(f"Сгенерировано сотрудников: {len(employees)}")
 
-    emp_csv = os.path.join(PARAMS["output_dir"], f"{PARAMS['output_base']}_{timestamp}.csv")
-    emp_xlsx = os.path.join(PARAMS["output_dir"], f"{PARAMS['output_base']}_{timestamp}.xlsx")
+    t4 = time.time()
     employees_df, _, _ = save_employees(
         employees,
         PARAMS["output_dir"],
@@ -427,12 +459,15 @@ def generate_all(logger):
         logger,
         timestamp=timestamp
     )
+    t5 = time.time()
+    logger.info(f"Время на сохранение сотрудников: {t5-t4:.2f} сек")
 
     logger.info("Генерация сотрудников завершена, начинаем генерацию посещений")
 
     visit_csv = os.path.join(VISIT_PARAMS["visit_out_dir"], f"{VISIT_PARAMS['visit_out_base']}_{timestamp}.csv")
     visit_xlsx = os.path.join(VISIT_PARAMS["visit_out_dir"], f"{VISIT_PARAMS['visit_out_base']}_{timestamp}.xlsx")
 
+    t6 = time.time()
     visit_data = generate_visits(
         employees_df,
         VISIT_PARAMS['visit_start_date'],
@@ -440,12 +475,30 @@ def generate_all(logger):
         VISIT_PARAMS['visit_target_row_count'],
         logger
     )
+    t7 = time.time()
+    logger.info(f"Время на генерацию посещений: {t7-t6:.2f} сек")
+
     save_visits(visit_data, visit_csv, visit_xlsx, logger)
+    t8 = time.time()
+    logger.info(f"Время на сохранение посещений: {t8-t7:.2f} сек")
     logger.info("Генерация посещений завершена")
 
+    # Лог финальных метрик
+    df_visits = pd.DataFrame(visit_data)
+    role_means = df_visits.groupby("ROLE_CODE")["Visited"].mean().to_dict() if not df_visits.empty else {}
+    logger.info(f"ИТОГ: сгенерировано сотрудников: {len(employees)}, посещений: {len(visit_data)}")
+    for role, mean in role_means.items():
+        logger.info(f"Среднее число посещений по роли '{role}': {mean:.2f}")
+    prog_t1 = time.time()
+    logger.info(f"Время выполнения generate_all: {prog_t1-prog_t0:.2f} сек")
 
+
+
+import time
 
 def aggregate(logger):
+    prog_t0 = time.time()
+    logger.info("----- АГРЕГАЦИЯ -----")
     params = AGG_PARAMS
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -454,10 +507,13 @@ def aggregate(logger):
     output_csv = os.path.join(params["output_dir"], f"{params['output_base']}_{timestamp}.csv")
     output_xlsx = os.path.join(params["output_dir"], f"{params['output_base']}_{timestamp}.xlsx")
 
+    t0 = time.time()
     logger.info("Режим агрегации посещений")
     df = pd.read_csv(input_csv, sep=";", dtype=str)
     df[params["field_nvisits"]] = pd.to_numeric(df[params["field_nvisits"]], errors="coerce").fillna(0).astype(int)
     df_role = pd.read_csv(input_role_csv, sep=";", dtype=str)
+    t1 = time.time()
+    logger.info(f"Время на загрузку файлов: {t1-t0:.2f} сек")
 
     # Агрегация по уникальным ключам, сумма посещений
     key_fields = [
@@ -467,7 +523,10 @@ def aggregate(logger):
     ]
     agg_dict = {params["field_nvisits"]: "sum"}
     logger.info(f"Агрегируем по: {key_fields}, агрегируем поле: {params['field_nvisits']}")
+    t2 = time.time()
     df_agg = df.groupby(key_fields, as_index=False).agg(agg_dict)
+    t3 = time.time()
+    logger.info(f"Время на агрегацию данных: {t3-t2:.2f} сек")
 
     # --- ДОБАВЛЯЕМ КОЛОНКИ МЕСЯЦ, НЕДЕЛЯ, ДВУХНЕДЕЛЬНЫЙ ПЕРИОД ---
     logger.info("Определяем максимальную дату для расчёта периодов...")
@@ -491,20 +550,23 @@ def aggregate(logger):
         tw_diff = ((max_2w_start - dt_2w_start).days) // 14
         return f"2N-{tw_diff}"
 
+    t4 = time.time()
     logger.info("Добавляем временные колонки (месяц, неделя, двухнедельный период)...")
     df_agg["PERIOD_MONTH"] = df_agg[params["field_date"]].apply(get_month_period)
     df_agg["PERIOD_WEEK"] = df_agg[params["field_date"]].apply(get_week_period)
     df_agg["PERIOD_2WEEK"] = df_agg[params["field_date"]].apply(get_2week_period)
+    t5 = time.time()
+    logger.info(f"Время на добавление временных колонок: {t5-t4:.2f} сек")
 
     # --- ДОБАВЛЯЕМ ДАННЫЕ ПО РОЛИ ---
     logger.info("Дозаполнение ROLE_CODE из штатки (join по TN)...")
     df_role_part = df_role[[params["field_tn"], params["field_role"]]].drop_duplicates()
     df_result = df_agg.merge(df_role_part, how="left", on=params["field_tn"])
-
+    t6 = time.time()
+    logger.info(f"Время на join с ROLE_CODE: {t6-t5:.2f} сек")
     logger.info(f"Финальный размер: {df_result.shape}")
 
     # === СОЗДАНИЕ SUMMARY-ЛИСТА ===
-    # Параметры summary
     SUMMARY_PARAMS = {
         "summary_sheet": "SUMMARY",
         "summary_csv_base": "SUMMARY",  # без расширения
@@ -516,7 +578,6 @@ def aggregate(logger):
     }
 
     logger.info("Формируем данные для SUMMARY листа...")
-    # Считаем дубли по TN
     tn_counts = df_role[params["field_tn"]].value_counts()
     df_role["IsDuplicate"] = df_role[params["field_tn"]].map(lambda x: "Дубль" if tn_counts[x] > 1 else "")
 
@@ -548,12 +609,13 @@ def aggregate(logger):
         visited = agg.loc[mask].groupby(params["field_tn"])[params["field_nvisits"]].sum().gt(0)
         df_summary[tw_label] = df_summary["TN"].map(lambda tn: int(visited.get(tn, False)))
 
-    # Сохраняем SUMMARY в CSV
+    t7 = time.time()
+    logger.info(f"Время на подготовку SUMMARY: {t7-t6:.2f} сек")
+
     summary_csv = os.path.join(params["output_dir"], f"{SUMMARY_PARAMS['summary_csv_base']}_{timestamp}.csv")
     df_summary.to_csv(summary_csv, sep=";", index=False)
     logger.info(f"Summary сохранён в CSV: {summary_csv}")
 
-    # ---- СОХРАНЕНИЕ С ТАЙМШТАМПОМ (Excel два листа) ----
     with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
         df_result.to_excel(writer, sheet_name="AGGREGATED", index=False)
         df_summary.to_excel(writer, sheet_name=SUMMARY_PARAMS["summary_sheet"], index=False)
@@ -561,11 +623,18 @@ def aggregate(logger):
     autofit_excel_columns(output_xlsx, sheet_name=SUMMARY_PARAMS["summary_sheet"])
     logger.info(f"Результат сохранён в Excel: {output_xlsx} (автоформатирование)")
 
-    # Сохраняем основной агрегат в CSV
     df_result.to_csv(output_csv, sep=";", index=False)
     logger.info(f"Результат сохранён в CSV: {output_csv}")
 
-    logger.info("Обработка завершена.")
+    # Финальная статистика по ролям
+    role_means = df_result.groupby("ROLE_CODE")[params["field_nvisits"]].mean().to_dict() if not df_result.empty else {}
+    logger.info(f"ИТОГ: обработано посещений: {len(df)}, уникальных записей: {len(df_result)}")
+    for role, mean in role_means.items():
+        logger.info(f"Среднее число посещений по роли '{role}': {mean:.2f}")
+
+    prog_t1 = time.time()
+    logger.info(f"Время выполнения aggregate: {prog_t1-prog_t0:.2f} сек")
+
 
 
 
@@ -618,22 +687,29 @@ def create_summary_sheet(logger, df_role, df_agg, max_date, output_dir, summary_
 
 
 def main():
+    prog_start = time.time()
     if MODE.upper() == "AGGREGATE":
         logger = setup_logging(AGG_PARAMS["log_dir"], AGG_PARAMS["log_base"])
+        logger.info("Старт режима АГРЕГАЦИЯ")
         aggregate(logger)
     elif MODE.upper() == "GENERATE":
         logger = setup_logging(PARAMS["log_dir"], PARAMS["log_base"])
+        logger.info("Старт режима ГЕНЕРАЦИЯ")
         generate_all(logger)
     else:
         logger = setup_logging(PARAMS["log_dir"], PARAMS["log_base"])
         logger.error("Некорректный режим работы! Допустимы только 'GENERATE' или 'AGGREGATE'.")
-
+    prog_end = time.time()
+    logger.info(f"ВРЕМЯ РАБОТЫ ВСЕЙ ПРОГРАММЫ: {prog_end - prog_start:.2f} сек.")
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
+        import traceback
+        logger = logging.getLogger()
+        logger.error(f"Ошибка при выполнении: {e}\n{traceback.format_exc()}")
         print(f"Ошибка при выполнении: {e}")
         raise
 
